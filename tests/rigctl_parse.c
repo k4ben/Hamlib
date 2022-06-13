@@ -648,10 +648,9 @@ static int next_word(char *buffer, int argc, char *argv[], int newline)
     return ret;
 }
 
-
 #define fprintf_flush(f, a...)        \
     ({ fprintf((f), a);               \
-       fflush((f));                   \
+       fflush(f);                     \
                                       \
     })
 
@@ -677,6 +676,7 @@ int rigctl_parse(RIG *my_rig, FILE *fin, FILE *fout, char *argv[], int argc,
     /* cmd, internal, rigctld */
     if (!(interactive && prompt && have_rl))
     {
+        fprintf_flush(fout, ";");
 
         if (interactive)
         {
