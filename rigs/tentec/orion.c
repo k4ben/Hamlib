@@ -74,6 +74,7 @@
 #include <unistd.h>  /* UNIX standard function definitions */
 #include <time.h>
 #include <sys/time.h>
+#include <math.h>
 
 #include <hamlib/rig.h>
 #include "bandplan.h"
@@ -1209,6 +1210,12 @@ int tt565_set_level(RIG *rig, vfo_t vfo, setting_t level, value_t val)
         break;
 
     case RIG_LEVEL_NR:
+        if (rig->caps->rig_model == RIG_MODEL_TT599)
+        {
+        SNPRINTF(cmdbuf, sizeof(cmdbuf), "*RMNN%c" EOM, (int)(val.f * 9));
+        }
+        else
+        {
         /* Noise Reduction (blanking) Float 0.0 - 1.0
             For some reason NB setting is supported in 1.372, but
            NR, NOTCH, and AN are not.
@@ -1217,6 +1224,7 @@ int tt565_set_level(RIG *rig, vfo_t vfo, setting_t level, value_t val)
         SNPRINTF(cmdbuf, sizeof(cmdbuf), "*R%cNB%d" EOM,
                  which_receiver(rig, vfo),
                  (int)(val.f * 9));
+        }
         break;
 
     case RIG_LEVEL_VOXDELAY:
@@ -1293,29 +1301,75 @@ int tt565_get_level(RIG *rig, vfo_t vfo, setting_t level, value_t *val)
             return retval;
         }
 
-        /* in Xmit, response is @STFuuuRvvvSwww (or ...Swwww)
-            uuu = 000-100 (apx) fwd watts
-                        vvv = 000-100       rev watts
-                        www = 256-999  256 * VSWR
-           in Rcv,  response is @SRMuuuSvvv
-            uuu = 000-100 (apx) Main S meter
-                        vvv = 000-100 (apx) Sub  S meter
-        */
-
-        if (lvlbuf[1] != 'S' || lvl_len < 5)
+        if (rig->caps->rig_model == RIG_MODEL_TT599)
         {
-            rig_debug(RIG_DEBUG_ERR, "%s: unexpected answer '%s'\n",
-                      __func__, lvlbuf);
-            return -RIG_EPROTO;
-        }
+            double fwd, ref;
 
-        if (lvlbuf[2] == 'T')
+            /* in Xmit, response is @STF99R10<cr> 99 watts forward,1.0 watt reflected
+                uu = fwd watts
+                vv = rev watts x 10
+
+               in Rcv,  response is @SRM16<CR> Indicates 16 dbm
+                uuu = 000-100 (apx) Main S meter
+            */
+
+            if (lvlbuf[1] != 'S' || lvl_len < 5)
+            {
+                rig_debug(RIG_DEBUG_ERR, "%s: unexpected answer '%s'\n",
+                          __func__, lvlbuf);
+                return -RIG_EPROTO;
+            }
+
+            if (lvlbuf[2] == 'T')
+            {
+                ref = atof(strchr(lvlbuf + 2, 'R') + 1) / 10.0;   /* reflected power */
+                fwd = atof(strchr(lvlbuf + 2, 'F') + 1);          /* forward power */
+
+                if (fwd == 0.0)
+                {
+                    val->f = 0.0;                                 /* no forward power */
+                }
+                else if (fwd == ref)                              /* too high SWR */
+                {
+                    val->f = 9.99;
+                }
+                else
+                {
+                    val->f = (1 + sqrt(ref / fwd)) / (1 - sqrt(ref / fwd)); /* calculate SWR */
+                }
+
+                if (val->f < 1.0) { val->f = 9.99; }              /* high VSWR */
+            }
+            else { val->f = 0.0; }  /* SWR in Receive = 0.0 */
+
+        }
+        else
         {
-            val->f = atof(strchr(lvlbuf + 5, 'S') + 1) / 256.0;
 
-            if (val->f < 1.0) { val->f = 9.99; }    /* high VSWR */
+            /* in Xmit, response is @STFuuuRvvvSwww (or ...Swwww)
+                uuu = 000-100 (apx) fwd watts
+                            vvv = 000-100       rev watts
+                            www = 256-999  256 * VSWR
+               in Rcv,  response is @SRMuuuSvvv
+                uuu = 000-100 (apx) Main S meter
+                            vvv = 000-100 (apx) Sub  S meter
+            */
+
+            if (lvlbuf[1] != 'S' || lvl_len < 5)
+            {
+                rig_debug(RIG_DEBUG_ERR, "%s: unexpected answer '%s'\n",
+                          __func__, lvlbuf);
+                return -RIG_EPROTO;
+            }
+
+            if (lvlbuf[2] == 'T')
+            {
+                val->f = atof(strchr(lvlbuf + 5, 'S') + 1) / 256.0;
+
+                if (val->f < 1.0) { val->f = 9.99; }    /* high VSWR */
+            }
+            else { val->f = 0.0; }  /* SWR in Receive = 0.0 */
         }
-        else { val->f = 0.0; }  /* SWR in Receive = 0.0 */
 
         break;
 
@@ -1640,8 +1694,15 @@ int tt565_get_level(RIG *rig, vfo_t vfo, setting_t level, value_t *val)
 
     case RIG_LEVEL_NR:
         /* RIG_LEVEL_NR controls Orion NB setting - TEMP */
+        if (rig->caps->rig_model == RIG_MODEL_TT599)
+        {
+        SNPRINTF(cmdbuf, sizeof(cmdbuf), "?RMNN" EOM)
+        }
+        else
+        {
         SNPRINTF(cmdbuf, sizeof(cmdbuf), "?R%cNB" EOM,
                  which_receiver(rig, vfo));
+        }
 
         lvl_len = sizeof(lvlbuf);
         retval = tt565_transaction(rig, cmdbuf, strlen(cmdbuf), lvlbuf, &lvl_len);
@@ -1651,8 +1712,7 @@ int tt565_get_level(RIG *rig, vfo_t vfo, setting_t level, value_t *val)
             return retval;
         }
 
-        if (lvlbuf[1] != 'R' || lvlbuf[3] != 'N' || lvlbuf[4] != 'B' ||
-                lvl_len < 6)
+        if (lvlbuf[1] != 'R' || lvl_len < 6)
         {
             rig_debug(RIG_DEBUG_ERR, "%s: unexpected answer '%s'\n",
                       __func__, lvlbuf);
